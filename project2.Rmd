@@ -1,0 +1,402 @@
+---
+title: "Austin Animal Shelter Data Analysis"
+author: "Hedi EL MATRI"
+date: "2025-11-11"
+output:
+  html_document:
+    theme: cosmo
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+    fig_caption: true
+    df_print: kable
+    highlight: tango
+    css: styles.css
+---
+
+```{r include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  fig.width = 8.5,
+  fig.height = 5.5,
+  fig.retina = 2,
+  dpi = 144,
+  dev = "png"
+)
+
+library(GSODR)
+library(dplyr)
+library(lubridate)
+library(knitr)
+library(tibble)
+library(ggplot2)
+library(kableExtra)
+
+ggplot2::theme_set(
+ggplot2::theme_light(base_size = 13, base_family = "sans") +
+  ggplot2::theme(
+      plot.title    = ggplot2::element_text(face = "bold", size = 16, hjust = 0.5, color = "black", margin = ggplot2::margin(b = 8)),
+      plot.title.position = "plot",
+      plot.margin   = ggplot2::margin(t = 18, r = 10, b = 10, l = 10),
+      axis.title.x  = ggplot2::element_text(face = "bold", size = 12, color = "black", margin = ggplot2::margin(t = 6)),
+      axis.title.y  = ggplot2::element_text(face = "bold", size = 12, color = "black", margin = ggplot2::margin(r = 6)),
+      axis.text.x   = ggplot2::element_text(size = 10, color = "black"),
+      axis.text.y   = ggplot2::element_text(size = 10, color = "black"),
+      axis.ticks    = ggplot2::element_line(color = "grey50"),
+      axis.line     = ggplot2::element_line(color = "grey60"),
+      panel.grid.major = ggplot2::element_line(color = "grey85", linewidth = 0.4),
+      panel.grid.minor = ggplot2::element_line(color = "grey92", linewidth = 0.25),
+      legend.position  = "bottom",
+      legend.title     = ggplot2::element_text(face = "bold"),
+      strip.text       = ggplot2::element_text(face = "bold")
+    )
+)
+
+update_geom_defaults("bar", list(color = NA))
+update_geom_defaults("col", list(color = NA))
+update_geom_defaults("boxplot", list(outlier.alpha = 0.5))
+
+```
+
+# Introduction
+
+This project will analyze animal intake and outcome data from the Austin Animal Center, a large municipal organization that processes thousands of animals annually. The analysis will use data from three distinct sources.
+
+The primary data is drawn from two publicly-maintained datasets provided by the City of Austin's official open data portal. These datasets contain detailed records for every animal processed by the center.
+
+-   Austin Animal Center Intakes: <https://data.austintexas.gov/Health-and-Community-Services/Austin-Animal-Center-Intakes/pyqf-r2dc/about_data>
+
+-   Austin Animal Center Outcomes: <https://data.austintexas.gov/Health-and-Community-Services/Austin-Animal-Center-Outcomes/gsvs-ypi7/about_data>
+
+A third data source for daily weather conditions will be generated using the GSODR R package. This package downloads data directly from the National Oceanic and Atmospheric Administration's (NOAA) "Global Summary of the Day" (GSOD) database for the Austin area.
+
+![Figure 1. The Austin Animal Center (Image Source: City of Austin)](https://media.kvue.com/assets/KVUE/images/56c5cbdd-1b85-46fb-b4d5-c3f99d194763/56c5cbdd-1b85-46fb-b4d5-c3f99d194763_1920x1080.jpg) Figure 1. The Austin Animal Center (Image Source: City of Austin) <br><br> These datasets were chosen because they provide an opportunity to understand the operational side of an animal shelter.
+
+The goal of this investigation is to identify patterns in the shelter's population such as the most common animal types and breeds while analyzing the key factors that influence animal outcomes: adoption, transfer, or return to owner. Specifically, this project will explore the relationship between an animal's characteristics like type, breed, and age, with external factors such as daily weather, and its total length of stay in the shelter.
+
+```{r}
+
+# Reading in the data
+Intakes = read.csv("Austin_Animal_Center_Intakes_(10_01_2013_to_05_05_2025)_20251112.csv")
+Outcomes = read.csv("Austin_Animal_Center_Outcomes_(10_01_2013_to_05_05_2025)_20251112.csv")
+
+# Loading the station list
+isd_history = get_isd_history()
+
+# Finding the stations with word Austin in them
+austin_stations = isd_history %>% filter(grepl("AUSTIN", NAME, ignore.case = TRUE))
+
+# Printing austin's stations
+### austin_stations
+
+# Finding the weather for AUSTIN-BERGSTROM INTL AIRPORT station
+Weather = get_GSOD(station = "722540-13904", years = 2013:2025)
+
+# Converting the weather's YEARMODA from character to Date
+Weather = Weather %>% mutate(YEARMODA = as.Date(YEARMODA))
+
+# Joining the first two datasets
+All_Pairs = inner_join(Intakes, Outcomes, by = "Animal.ID")
+
+# Creating a variable, Intake.Date, that is the date type of the Source.Date, when the animal was found
+All_Pairs$Intake.Date = mdy_hms(All_Pairs$DateTime.x)
+
+# Creating a variable, Outcome.Date, that is the Source.Date variable but in date datatype
+All_Pairs$Outcome.Date = ymd_hms(All_Pairs$DateTime.y)
+
+# Removing all pairs with an outcome date inferior than the intake date
+Valid_Pairs = All_Pairs %>% filter(Outcome.Date > Intake.Date)
+
+# Removing all but the first outcome for every unique intake
+Clean_Data = Valid_Pairs %>% group_by(Animal.ID, Intake.Date) %>% slice_min(order_by = Outcome.Date, n = 1) %>% ungroup()
+
+# Making that variable into a data datatype
+Clean_Data$YEARMODA = as.Date(Clean_Data$Intake.Date)
+
+# Joining all datasets into one
+Dataset = inner_join(Clean_Data, Weather, by = "YEARMODA")
+
+# Creating a variable that is the month of the of the Intake.Date
+Dataset$Intake.Month = month(Dataset$Intake.Date)
+
+# Creating a function that returns a vector of seasons given a vector of months
+Season = function(months){
+  d = character(length(months))
+  for (i in 1:length(months)){
+   	spe = months[i]
+   	if (is.na(spe)){
+ 	d[i] = NA
+ 	}
+ 	else if (spe %in% c(12, 1, 2)){
+ 	 	d[i] = "Winter"
+ 	}
+ 	else if (spe %in% c(3, 4, 5)){
+ 	 	d[i] = "Spring"
+ 	}
+ 	else if (spe %in% c(6, 7, 8)){
+ 	 	d[i] = "Summer"
+ 	}
+ 	else{
+ 	 	d[i] = "Fall"
+ 	}
+ }
+ return(d)
+}
+
+# Creating a new variable, Season.of.Intake, that corresponds to the season of the Intake.Date
+Dataset = Dataset %>% mutate(Season.of.Intake = Season(Intake.Month))
+
+# Creating a variable, Birth.Date, that is the date of birth of the animal removing the time component
+Dataset$Birth.Date = as.Date(Dataset$Date.of.Birth)
+
+# Creating a variable, Age, that is the age of the animal in months (minimum value is 0)
+Dataset$Age = round(pmax(0, as.numeric(difftime(as.Date(Dataset$Intake.Date), Dataset$Birth.Date, units = "days")) / 30), 2)
+
+# Transforming any missing value in Intake.Health.Condition into NA
+Dataset$Intake.Condition = na_if(Dataset$Intake.Condition, "")
+
+# Making the Days.in.Shelter variable numeric
+Dataset$Days.in.Shelter = as.numeric(difftime(Dataset$Outcome.Date, Dataset$Intake.Date, units = "days"))
+```
+
+# Data Preparation
+
+This analysis integrates three distinct data sources to create a final dataset ready for analysis.
+
+# Data Sourcing
+
+-   Austin Animal Center Data: Two primary datasets, "Austin Animal Center Intakes" and "Austin Animal Center Outcomes," were downloaded as CSV files from the City of Austin's open data portal. I imported them into R using the read.csv() function.
+
+-   Weather Data: I obtained the third dataset for daily weather by using the GSODR package. First, I used the package's get_isd_history() function to identify the station ID for "AUSTIN-BERGSTROM INTL AIRPORT" (722540-13904). Then, with the get_GSOD() function I obtained the daily weather summary for this station for the years 2013 to 2025.
+
+# Data Processing and Cleaning
+
+## Challenges
+
+The most significant challenge in data preparation was correctly linking an animal's intake record to its corresponding outcome record. A single Animal.ID can appear multiple times in both datasets which means the animal had multiple shelter stays. A simple inner_join on Animal.ID would create many incorrect many-to-many matches.
+
+I resolved the problem through these steps:
+
+-   The Source.Date (from Intakes) and Outcome.Date (from Outcomes) columns were parsed from character strings into date-time objects using the parse_date_time() function.
+
+-   The joined dataset was filtered to remove all rows where the Outcome.Date occurred before the Intake.Date.
+
+-   To solve the many-to-many problem, the data was grouped by Animal.ID and Intake.Date. The slice_min() function was then applied to select only the earliest outcome for each unique intake event. This step made sure that each row in the Clean_Data frame represents a single shelter visit.
+
+Once ready, the clean data was joined with the Weather dataset. To do this, the Intake.Date was converted to a simple Date object and served as the YEARMODA key for the join.
+
+I also faced a problem with the data source itself. First, I tried to use the newest data model. I quickly found it did not have enough data for my project. Because of this, I had to switch to the larger older dataset. This change was not simple as it took me a lot of time to adapt my code to work with the old data's structure.
+
+## Engineered variables
+
+-   Season.of.Intake: The Intake.Month was extracted from the Intake.Date. A custom function I created mapped this month to one of four seasons.
+
+-   Age_in_Months: The animal's date of birth and date at time of intake were used to calculate the animals age at intake. The pmax() function was used so all negative ages were set to 0. Days were then converted into months.
+
+## Handling NA Values
+
+Missing values for the Intake.Health.Condition variable were changed to empty strings (""). The na_if() function was used to convert all empty strings in this column into proper NA values so they wouldn't cause problems during analysis.
+
+In the final dataset there are 172257 observations and 7 variables.
+
+## Variable Descriptions
+
+```{r}
+
+# Filtering the dataset by the variable this analysis will use
+ACP =  Dataset %>% select( Animal_Type = Intake.Type, Health_Condition = Intake.Condition, Outcome = Outcome.Type, Intake_Season = Season.of.Intake, Age_in_Months = Age, Days_in_Shelter = Days.in.Shelter, Avg_Temp_on_Intake = TEMP)
+
+# Making categorical variables as factors
+ACP = ACP %>% mutate(Animal_Type = as.factor(Animal_Type), Health_Condition = as.factor(Health_Condition), Outcome = as.factor(Outcome), Intake_Season = as.factor(Intake_Season))
+
+# Creating a table describing the ACP dataset
+table = tibble( "Variable Name" = names(ACP), "Data Type" = sapply(ACP, class), "Description" = c("The type of animal.", "The health condition of the animal upon intake.", "The final outcome status for the animal.", "The season during which the animal was taken in.", "The animal's age at intake in months.", "The total number of days the animal spent in the shelter.", "The average temperature on the day of the animal's intake."))
+
+# Displaying the table
+kable(table, caption = "ACP Variable Summary") %>% kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed"))
+
+# Attaching each variable for a simpler usage
+attach(ACP)
+
+```
+
+# Univariate Analyses
+
+<br><br>
+
+This bar chart displays the frequency distribution of animal intakes across the four seasons. The distribution is not uniform, indicating a distinct seasonal pattern. The most frequent category is Summer, which has the highest number of intakes at about 47,000. Spring is the second-busiest season, approximately 44,000 intakes, followed closely by Fall with 45,000. The number of intakes drops noticeably in Winter, which is the least frequent category with approximately 36,000 intakes. This shows a clear seasonal variation, with intake counts peaking in the summer and reaching their lowest point in the winter. The range between the most and least frequent season is approximately 10,000 intakes.
+
+```{r}
+# Plotting the animal intakes by season
+ggplot(ACP, aes(x = Intake_Season)) + geom_bar(aes(fill = Intake_Season), show.legend = FALSE) + geom_text(stat = "count", aes(label = after_stat(count), vjust = -0.5)) + labs( title = "Animal Intakes by Season", x = "Season of Intake", y = "Total Number of Intakes")
+```
+
+<br><br>
+
+This bar chart illustrates the frequency of different intake types. The data is heavily concentrated in one category, identifying a main way animals enter the shelter. The modal intake type is "Stray", which accounts for `r sum(Animal_Type == "Stray", na.rm = TRUE)` intakes, or `r round(100 * sum(Animal_Type == "Stray", na.rm = TRUE) / sum(!is.na(Animal_Type)), 1)` % of the total. This is substantially higher than the second most common category, "Owner Surrender", with `r sum(Animal_Type == "Owner Surrender", na.rm = TRUE)` intakes `r round(100 * sum(Animal_Type == "Owner Surrender", na.rm = TRUE) / sum(!is.na(Animal_Type)), 1)` %. The remaining categories, such as "Public Assist" `r sum(Animal_Type == "Public Assist", na.rm = TRUE)` and "Wildlife" `r sum(Animal_Type == "Wildlife", na.rm = TRUE)`, represent a much smaller fraction of total intakes.
+
+```{r}
+
+# Plotting the distribution of intakes by animal type
+ggplot(ACP, aes(x = Animal_Type)) + geom_bar(aes(fill = Animal_Type), show.legend = FALSE) + geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.5) +  labs(title = "Distribution of Intakes by Animal Type", x = "Animal Type", y = "Total Number of Intakes") + theme(axis.text.x = element_text(size = 7))
+```
+
+<br><br>
+
+The histogram of animal age at intake reveals a right-skewed distribution. A very large proportion of incoming animals are young, with the highest frequency count occurring in the first bin, near 0 months, representing very young animals or newborns. The median age at intake is `r round(median(Age_in_Months, na.rm = TRUE), 1)` months, which clearly shows the typical animal is quite young. The mean age, `r round(mean(Age_in_Months, na.rm = TRUE), 1)` months, is significantly higher, influenced by the long spread of older animals. This skewness is reflected in the large standard deviation of `r round(sd(Age_in_Months, na.rm = TRUE), 1)`. The distribution also shows smaller peaks around 12 and 24 months, suggesting potential data misleads, where owners or staff may round ages to one or two years.
+
+```{r}
+
+# Plotting the distribution of animal age at intake
+ggplot(ACP, aes(x = Age_in_Months)) + geom_histogram(binwidth = 6, fill = "steelblue", color = "white") + coord_cartesian(xlim = c(0, 120)) + labs(title = "Distribution of Animal Age at Intake", x = "Age at Intake (Months)", y = "Count")
+
+```
+
+<br><br>
+
+The distribution of the duration animals stay in the shelter is visualized with a log-transformed x-axis. This was necessary because the raw data is significantly right-skewed, with most stays being short but a spread of very long stays. The distribution on the log scale appears multimodal, with a peak around 5 days and another smaller peak near 1 day. The skewed data has a median length of stay of `r round(median(Days_in_Shelter, na.rm = TRUE), 1)` days. The mean length of stay is `r round(mean(Days_in_Shelter, na.rm = TRUE), 1)` days, which is pulled higher by the outliers. The standard deviation is `r round(sd(Days_in_Shelter, na.rm = TRUE), 1)` , showcasing significant variability in how long animals remain in the shelter.
+
+```{r}
+# Plotting the distribution of the duration of each shelter stay
+ggplot(ACP, aes(x = Days_in_Shelter)) + geom_histogram(fill = "darkgreen", color = "white", bins = 50) + scale_x_log10(breaks = c(0.1, 1, 3, 7, 30, 90, 365, 1000)) + labs(title = "Distribution of Shelter Stay Duration", x = "Days in Shelter (Log Scale)", y = "Count") 
+```
+
+<br><br>
+
+# Multivariate Analyses
+
+```{r}
+
+# Finding interesting relations
+#plot(ACP)
+
+
+```
+
+<br><br>
+
+This scatter plot compares the "Age at Intake" (x-axis) against the "Days in Shelter" (y-axis), with both axes presented on a log scale. The data points are color-coded by the "Animal Type". The plot shows that the vast majority of animals, primarily Stray (blue) and Owner Surrender (green), create a large cloud with no strong correlation between age and length of stay. An interesting observation is that Wildlife intakes (pink) show a very distinct pattern, with nearly all points clustered at the bottom of the graph. Conversely, Euthanasia Request (yellow) points are few but are clustered in the lower right, representing older animals with short shelter stays. The relationship between the age and shelter duration is very weak, with a correlation coefficient of `r round(cor(log(ACP$Age_in_Months[ACP$Age_in_Months > 0 & ACP$Days_in_Shelter > 0]), log(ACP$Days_in_Shelter[ACP$Age_in_Months > 0 & ACP$Days_in_Shelter > 0]), use = "complete.obs"), 2)`.
+
+```{r}
+
+# Filtering to remove 0s for log scale and sample some of the data
+P_data1 = ACP %>% filter(Age_in_Months > 0 & Days_in_Shelter > 0) %>% slice_sample(n = 10000)
+
+# Plotting the animal age, duration in shelter by type
+ggplot(P_data1, aes(x = Age_in_Months, y = Days_in_Shelter)) + geom_point(aes(color = Animal_Type), alpha = 0.5) + scale_x_log10(breaks = c(1, 6, 12, 60, 120), labels = c("1 mths", "6 mths", "1 yr", "5 yrs", "10 yrs")) + scale_y_log10(breaks = c(1, 7, 30, 90, 365), labels = c("1d", "7d", "30d", "90d", "365d")) + labs(title = "Animal Age vs. Days in Shelter by Type (Log Scale)", x = "Age at Intake (Log Scale)", y = "Days in Shelter (Log Scale)", color = "Animal Type")
+
+
+```
+
+<br><br>
+
+This series of box plots illustrates the distribution of "Days in Shelter" (y-axis log scale) for the four main "Outcome Types". There are clear differences in the length of stay for each outcome. Adoption is associated with the longest shelter stays, with a median duration of 3 weeks. In contrast, Euthanasia has the shortest median stay, appearing to be few hours. Return to Owner and Transfer have similar median stays, falling between the other two groups at 1 and 3 days. The difference between outcomes is clear with the median stay for 'Adoption' `r round(median(ACP$Days_in_Shelter[ACP$Outcome == "Adoption"], na.rm = TRUE), 0)` days, being significantly longer than for 'Euthanasia' `r round(median(ACP$Days_in_Shelter[ACP$Outcome == "Euthanasia"], na.rm = TRUE), 0)` day.
+
+```{r}
+
+# Stating the most common outcomes to keep the plot clean
+common_outcomes = c("Adoption", "Transfer", "Return to Owner", "Euthanasia")
+
+# Filtering the most common outcomes
+P_data2 = ACP %>% filter(Outcome %in% common_outcomes)
+
+# Plotting the length of shetler stay for different outcomes
+ggplot(P_data2, aes(x = Outcome, y = Days_in_Shelter)) + geom_boxplot(aes(fill = Outcome), show.legend = FALSE) + scale_y_log10(breaks = c(1, 3, 7, 30, 90, 365), labels = c("1d", "3d", "7d", "30d", "90d", "365d")) + labs(title = "Length of Shelter Stay by Final Outcome", x = "Outcome Type", y = "Days in Shelter (Log Scale)")
+
+```
+
+<br><br>
+
+This stacked bar chart shows the relative proportions of different "Intake Types" across the four "Seasons of Intake". The most striking feature of this graph is the stability of these proportions for Fall, Spring, and Summer. Stray (blue) is consistently the largest category, making up an estimated 65% of all intakes in every season. Owner Surrender (red) is the next most common, consistently accounting for roughly 20% of intakes. In Winter, the proportion of Stray intakes goes down, dropping to 55%. This tells us that while the total number of intakes might change every season, the proportions of intake types remains steady. This seasonal difference is notable in winter, when the proportion of 'Stray' intakes drops by approximately `r { summer_prop = sum(ACP$Intake_Season == "Summer" & ACP$Animal_Type == "Stray", na.rm = TRUE) / sum(ACP$Intake_Season == "Summer", na.rm = TRUE); winter_prop = sum(ACP$Intake_Season == "Winter" & ACP$Animal_Type == "Stray", na.rm = TRUE) / sum(ACP$Intake_Season == "Winter", na.rm = TRUE); round((summer_prop - winter_prop) * 100, 0) }` percentage points.
+
+```{r}
+
+# Finding the most common intake types to keep the plot clean
+common_intake_types = c("Stray", "Owner Surrender", "Public Assist", "Wildlife")
+
+# Filtering the most common types
+P_data3 = ACP %>% filter(Animal_Type %in% common_intake_types)
+  
+# Plotting the proportion of intake type by season
+ggplot(P_data3, aes(x = Intake_Season, fill = Animal_Type)) + geom_bar(position = "fill") + labs(title = "Proportion of Intake Types by Season", x = "Season of Intake", y = "Proportion", fill = "Intake Type") + scale_y_continuous(labels = scales::percent)
+
+```
+
+<br><br>
+
+This faceted stacked bar chart compares outcomes based on the animal's "Intake Health Condition" (Injured, Normal, Sick), split into two graphs for "Owner Surrender" and "Stray" animals. For animals in 'Normal' condition, the 'Adoption' (red) proportion is the largest outcome in both groups, at approximately 50% for 'Stray' and just over 70% for 'Owner Surrender'. Health status has a big impact for 'Sick' animals, the 'Euthanasia' (green) proportion increases significantly to over 15% for 'Owner Surrender' cases. A key difference between the facets is that 'Return to Owner' (blue) is a major outcome for 'Stray' animals, around 15% for those in 'Normal' conditions, but is nearly nonexistent for 'Owner Surrender' animals. For animals in 'Normal' condition, the adoption rate for 'Owner Surrender' animals is 71 percentage points.
+
+```{r}
+
+# Filtering for main intake types, common health statuses, and common outcomes
+P_data4 = ACP %>% filter(Animal_Type %in% c("Stray", "Owner Surrender") & Outcome %in% c("Adoption", "Transfer", "Euthanasia", "Return to Owner") & Health_Condition %in% c("Normal", "Sick", "Injured"))
+# Plotting the outcome by health condition for both owner surrender and stray
+ggplot(P_data4, aes(x = Health_Condition, fill = Outcome)) + geom_bar(position = "fill") + facet_wrap(~Animal_Type) + labs(title = "Outcome by Health Condition, Faceted by Intake Type", x = "Intake Health Condition", y = "Proportion of Outcomes", fill = "Outcome")
+
+```
+
+<br><br>
+
+```{r}
+
+# Aggregating the data to get a daily count
+daily_intakes = ACP %>% group_by(Avg_Temp_on_Intake) %>% summarise(Intake_Count = n()) %>% ungroup()
+```
+
+This scatter plot examines the relationship between "Avg_Temp_on_Intake" and the total number of animals processed on days with that temperature. The plot shows a relationship. Intakes are very low on cold days, below 5°C. As the temperature warms, the number of intakes steadily increases, as shown by the red line. The volume of intakes peaks at hot temperatures, roughly between 25°C and 30°C. However, at the very hottest temperatures, above 30°C, the number of daily intakes appears to drop off. The Pearson's correlation coefficient between the daily Celsius temperature and the total number of intakes is `r round(cor(daily_intakes$Avg_Temp_on_Intake, daily_intakes$Intake_Count), 3)`. This positive value indicates a general tendency for more intakes on warmer days.
+
+```{r}
+
+# Aggregating the data to get a daily count
+daily_intakes = ACP %>% group_by(Avg_Temp_on_Intake) %>% summarise(Intake_Count = n()) %>% ungroup()
+
+# Plotting the animal intakes by daily temperature
+ggplot(daily_intakes, aes(x = Avg_Temp_on_Intake, y = Intake_Count)) + geom_point(alpha = 0.4, color = "steelblue") + geom_smooth(method = "loess", color = "red", se = FALSE) + labs(title = "Total Animal Intakes by Average Daily Temperature", x = "Average Temperature on Intake Day (°C)", y = "Total Number of Intakes") 
+
+
+```
+
+<br><br>
+
+This box plot examines the relationship between "Animal_Type" and" Intake_Year". The visualization reveals a shift in intake classifications over time. The 'Euthanasia Request' category is heavily concentrated in the early years of the dataset, with a median around 2014. This suggest that this specific intake classification was largely discontinued or reclassified after 2015. Conversely, the 'Abandoned' category appears to be a much more recent, with a median intake year of 2023 and the entire interquartile range falling within the last few years. Standard categories like 'Owner Surrender', 'Public Assist', and 'Stray' show a distribution spanning the full timeline (2013-2025). However, 'Wildlife' intakes show slightly older median year of 2017, suggesting a potential decrease of wildlife intakes over the years.
+
+```{r}
+ACP$Intake_Year = year(Dataset$Intake.Date)
+
+# Plotting 
+ggplot(ACP, aes(x = Animal_Type, y = Intake_Year)) +  geom_boxplot(fill = "steelblue") +  labs(title = "Analysis of Animal_Type by Intake Year", x = "Animal_Type",  y = "Intake Year") 
+```
+
+# Reproducibility
+
+Several steps were taken to ensure the report is reproducible:
+
+-   All required R packages, GSODR, dplyr, lubridate, knitr, tibble, ggplot2, are loaded in the first setup chunk. Any user running this file would first need to install these packages.
+
+-   The weather data is fully reproducible as it is not saved locally. The code uses the GSODR package to pull the data directly from the NOAA GSOD database using the get_GSOD() function.
+
+-   The two primary datasets, Austin_Animal_Center_Intakes.csv and Austin_Animal_Center_Outcomes.csv, are loaded from local files. For the anyone to reproduce the report, these two CSV files need to be located in the same directory as the .Rmd file.
+
+# Conclusion
+
+This analysis integrated animal shelter records with daily weather data to identify the factors influencing shelter operations and animal outcomes. The major findings showed a strong seasonal and weather-driven pattern. Animal intakes are not random as they peak during the Summer and on hotter days , with the lowest intake volumes occurring in Winter. This seasonal change is linked to a significant drop in the proportion of "Stray" animals during colder months. As hypothesized, an animal's journey through the shelter is strongly influenced by its specific circumstances. The final outcome was the strongest predictor of shelter duration. "Adoption" is a long process, with a median stay of three weeks, while "Euthanasia" occurs very quickly, often within a day. The "Return to Owner" outcome was as expected, a major pathway for "Strays" but was non-existent for "Owner Surrenders." "Adoption" was the dominant outcome for "Normal" animals, but "Euthanasia" rates rose sharply for "Sick" animals. Interestingly, no strong correlation was found between an animal's age and its length of stay. This says that once an animal is in the shelter, other factors like its health, intake type, and eventual outcome, are more decisive than its age in determining how long the stay at the center is. Beyond animal characteristics, the longitudinal data revealed shifts in administrative trends. The analysis of intake years identified that "Euthanasia Requests" effectively ceased after 2015, while "Abandoned" cases emerged as a distinct new category in 2023. Furthermore, the relationship between temperature and intake volume proved to be non-linear. While warmer weather generally drives higher intakes, the data indicates a threshold where shelter activity drops off once average daily temperatures exceed 30°C.
+
+# References
+
+City of Austin. (2025). Austin Animal Center Intakes. Austin Open Data Portal. Retrieved November 12, 2025, from <https://data.austintexas.gov/Health-and-Community-Services/Austin-Animal-Center-Intakes/pyqf-r2dc/about_data>
+
+City of Austin. (2025). Austin Animal Center Outcomes. Austin Open Data Portal. Retrieved November 12, 2025, from <https://data.austintexas.gov/Health-and-Community-Services/Austin-Animal-Center-Outcomes/gsvs-ypi7/about_data>
+
+City of Austin. (n.d.). The Austin Animal Center [Image]. KVUE. Retrieved November 11, 2025, from <https://media.kvue.com/assets/KVUE/images/56c5cbdd-1b85-46fb-b4d5-c3f99d194763/56c5cbdd-1b85-46fb-b4d5-c3f99d194763_1920x1080.jpg>
+
+Grolemund, G., & Wickham, H. (2011). Dates and Times Made Easy with lubridate. Journal of Statistical Software, 40(3), 1-25. <https://www.jstatsoft.org/v40/i03/>
+
+National Oceanic and Atmospheric Administration (NOAA). (2025). Global Summary of the Day (GSOD). National Centers for Environmental Information.
+
+Sparks, A. H., Hengl, T., & Nelson, A. (2018). GSODR: Global Summary of the Day Weather Data in R. R package version 1.1.5. <https://CRAN.R-project.org/package=GSODR>
+
+Wickham, H. (2016). ggplot2: Elegant Graphics for Data Analysis. Springer-Verlag New York.
